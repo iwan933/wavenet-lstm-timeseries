@@ -20,7 +20,6 @@ class DataTestCase(unittest.TestCase):
     def test_make_dataset(self):
         df_train, df_validation, df_test = split_train_test_validation(self.asset)
         dataset = make_dataset(df_train, sequence_length=252, sequence_stride=50)
-        print(dataset)
 
 
 if __name__ == '__main__':
