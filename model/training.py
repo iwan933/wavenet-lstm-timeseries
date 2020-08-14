@@ -1,41 +1,69 @@
 import tensorflow as tf
 
 
-def loss(model, x: tf.data.Dataset, y, training):
-    # training=training is needed only if there are layers with different
-    # behavior during training versus inference (e.g. Dropout).
-    std_deviation = x[:, :, -1]
-    daily_return = x[:, :, -2]
-    target_dev = 0.15
-    out = model(x[:, :, :-2], training=training)
-    out = tf.squeeze(out)
-    return -tf.reduce_sum(out * target_dev / std_deviation * daily_return) + model.losses
+def r(out, target, std_deviation, daily_return):
+    """
+    Calculates a term that is used more often
+    :param out: output from model
+    :param target: target returns (annual)
+    :param std_deviation: volatility estimate
+    :param daily_return: daily returns for each time step
+    :return:
+    """
+    return out * target / std_deviation * daily_return
 
 
-def train_model(model: tf.keras.Model, train_dataset: tf.data.Dataset, val: tf.data.Dataset):
-    # Keep results for plotting
-    train_loss_results = []
-    train_accuracy_results = []
-    optimizer = tf.optimizers.Adam()
+def returns_loss(model: tf.keras.Model, target):
+    """
+    custom loss calculating returns based on decision y_pred
+    :param model: model to add loss to calculation
+    :param target: target returns (annual)
+    :return:
+    """
+    def loss(y_true: tf.Tensor, y_pred: tf.Tensor):
+        std_deviation = y_true[:, :, -1]
+        daily_return = y_true[:, :, -2]
+        out = tf.squeeze(y_pred)
+        return -tf.reduce_sum(r(out, target, std_deviation, daily_return)) + model.losses
 
-    num_epochs = 201
+    return loss
 
-    for epoch in range(num_epochs):
-        epoch_loss_avg = tf.keras.metrics.Mean()
 
-        # Training loop - using batches of 32
-        for x, y in train_dataset:
-            with tf.GradientTape() as tape:
-                loss_value = loss(model, x, y, training=True)
-                grads = tape.gradient(loss_value, model.trainable_variables)
-                optimizer.apply_gradients(zip(grads, model.trainable_variables))
-                epoch_loss_avg.update_state(loss_value)
+def sharpe_loss(model: tf.keras.Model, target):
+    """
+    custom loss calculating returns based on decision y_pred
+    :param model: model to add loss to calculation
+    :param target: target returns (annual)
+    :return:
+    """
+    def loss(y_true: tf.Tensor, y_pred: tf.Tensor):
+        std_deviation = y_true[:, :, -1]
+        daily_return = y_true[:, :, -2]
+        out = tf.squeeze(y_pred)
+        r_it = r(out, target, std_deviation, daily_return)
+        return -(tf.reduce_sum(r_it)/(tf.reduce_sum(r_it ** 2) - tf.reduce_sum(r_it) ** 2)) + model.losses
 
-        for x, y in val:
-            pass
+    return loss
 
-        # End epoch
-        train_loss_results.append(epoch_loss_avg.result())
 
-        print("Epoch {:03d}: Loss: {:.3f}".format(epoch, epoch_loss_avg.result()))
-
+def fit(model, train, val, patience=10, epochs=100):
+    """
+    Compiles the keras model and calls the build in training procedure
+    :param optimizer: learning rate parameters
+    :param target: the annual return target
+    :param loss: custom loss which gets a model and target as parameter
+    :param model: model to train
+    :param train: training data
+    :param val: validation data used for performance measures
+    :param patience: how many iterations to wait for improvement before early stopping
+    :param epochs: how many epochs to train at most
+    :return:
+    """
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss',
+                                                      patience=patience,
+                                                      mode='min')
+    history = model.fit(train, epochs=epochs,
+                        validation_data=val,
+                        verbose=2,
+                        callbacks=[early_stopping])
+    return history

@@ -1,22 +1,19 @@
 import pandas as pd
 import numpy as np
 import tensorflow as tf
-import math
 
-from scipy.ndimage.interpolation import shift
-from sklearn.preprocessing import StandardScaler
 from pathlib import Path
 from typing import List, Dict, Any
 from pandas.core.frame import DataFrame
 
 
-def load_data(directory_path: str) -> Dict[str, Any]:
+def load_data(data_dir: str) -> Dict[str, Any]:
     """
     Loads assets from csv files in given directory.
-    :param directory_path: directory path containing the asset csvs
+    :param data_dir: directory path containing the asset csvs
     :return:
     """
-    data_dir = Path(directory_path)
+    data_dir = Path(data_dir)
     assets = dict()
     for path in data_dir.iterdir():
         symbol = path.name.split('_')[0]
@@ -49,30 +46,32 @@ def split_train_test_validation(df: DataFrame):
     return df[:train], df[train:train+validation], df[train+validation:]
 
 
-def make_dataset(df: DataFrame, sequence_length: int, sequence_stride=1, shift=1, return_sequence=True, columns=None) -> tf.data.Dataset:
+def make_dataset(df: DataFrame, sequence_length: int, return_sequence=True, shift=1, batch_size=32)\
+        -> tf.data.Dataset:
     """
     Creates a dataset with
+    :param batch_size: batch size
+    :param return_sequence: boolean defining if the full sequence should be returned for prediction data
     :param df: data frame containing data to process
     :param sequence_length: length of sequence, inclusive prediction
-    :param columns:
-    :param sequence_stride:
-    :param return_sequence: bool indicating if full sequence should be returned
     :param shift: determines the shift of the prediction (t1, .. , tn) -> t+shift
     :return:
     """
+    prediction_columns = ['close', 'return', 'std_deviation']
+    assert all([c in df.columns for c in prediction_columns]), df.columns
     data = np.array(df, dtype=np.float32)
     ds = tf.keras.preprocessing.timeseries_dataset_from_array(
         data=data,
         targets=None,
         sequence_length=sequence_length,
-        # sequence_stride=sequence_stride,
         shuffle=False,
-        batch_size=32,)
+        batch_size=batch_size)
     column_indices = {name: i for i, name in enumerate(df.columns)}
+    selected_columns = [column_indices[c] for c in prediction_columns]
     ds = ds.map(split_sequence(sequence_length=sequence_length,
-                               return_sequence=True,
+                               return_sequence=return_sequence,
                                shift=shift,
-                               label_column_indices=[column_indices['close']]))
+                               label_column_indices=selected_columns))
     return ds
 
 
@@ -87,7 +86,7 @@ def split_sequence(sequence_length: int, return_sequence: bool, shift: int, labe
     """
     def _split_sequence(dataset: tf.data.Dataset):
         num_target_labels = sequence_length - shift if return_sequence else 1
-        inputs = dataset[:, slice(0, sequence_length - shift), :]
+        inputs = dataset[:, slice(0, sequence_length - shift), :-2]
         labels = dataset[:, slice(sequence_length - num_target_labels, None), :]
         if label_column_indices is not None and len(label_column_indices) > 0:
             # Only select required columns
@@ -98,3 +97,38 @@ def split_sequence(sequence_length: int, return_sequence: bool, shift: int, labe
         labels.set_shape([None, num_target_labels, None])
         return inputs, labels
     return _split_sequence
+
+
+def create_full_datasets(data_dir, sequence_length=60, return_sequence=True, shift=1, batch_size=32):
+    """
+    Creates a full dataset from all assets concatenated
+    :param batch_size: batch size
+    :param data_dir: directory to read csv files from
+    :param sequence_length: specifies the length of the time series windows
+    :param return_sequence: boolean specifying if for each sequence prediction labels should be returned
+    :param shift: shift of prediction
+    :return:
+    """
+    assets = load_data(data_dir)
+    keys = list(assets.keys())
+    symbol = keys[0]
+    asset = preprocess(assets.get(symbol))
+    train, validation, test = split_train_test_validation(asset)
+    train_dataset = make_dataset(train, sequence_length=sequence_length,
+                                 shift=shift, return_sequence=return_sequence, batch_size=batch_size)
+    validation_dataset = make_dataset(validation, sequence_length=sequence_length,
+                                      shift=shift, return_sequence=return_sequence, batch_size=batch_size)
+    test_dataset = make_dataset(test, sequence_length=sequence_length,
+                                shift=shift, return_sequence=return_sequence, batch_size=batch_size)
+    for symbol in keys[1:]:
+        asset = preprocess(assets.get(symbol))
+        train, validation, test = split_train_test_validation(asset)
+        train_dataset = train_dataset.concatenate(
+            make_dataset(train, sequence_length=sequence_length, shift=shift, return_sequence=return_sequence,
+                         batch_size=batch_size))
+        validation_dataset = validation_dataset.concatenate(
+            make_dataset(validation, sequence_length=sequence_length, shift=shift, return_sequence=return_sequence,
+                         batch_size=batch_size))
+        test_dataset = test_dataset.concatenate(make_dataset(test, sequence_length=sequence_length, shift=shift,
+                                                             return_sequence=return_sequence, batch_size=batch_size))
+    return train_dataset, validation_dataset, test_dataset
